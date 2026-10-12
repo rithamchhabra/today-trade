@@ -127,7 +127,7 @@ st.markdown("""
 # Initialize singletons in session state
 if "db" not in st.session_state:
     st.session_state.db = DatabaseManager()
-if "telegram" not in st.session_state or not hasattr(st.session_state.telegram, "auto_discover_chat_id"):
+if "telegram" not in st.session_state or not hasattr(st.session_state.telegram, "start_listener"):
     st.session_state.telegram = TelegramAlertDispatcher()
 if "gemini" not in st.session_state:
     st.session_state.gemini = GeminiAdvisor()
