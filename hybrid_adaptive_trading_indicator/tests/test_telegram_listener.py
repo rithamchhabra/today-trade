@@ -78,3 +78,48 @@ def test_telegram_help_message():
     help_msg = dispatcher._build_help_message()
     assert "p/l" in help_msg
     assert "balance" in help_msg
+
+def test_telegram_rejection_alert_formatting():
+    from hybrid_adaptive_trading_indicator.risk.models import RiskDecision
+    dispatcher = TelegramAlertDispatcher(bot_token="fake_token", chat_id="123456")
+    
+    sent_payloads = []
+    dispatcher._send_telegram_raw = lambda text, target_chat_id=None: sent_payloads.append(text) or True
+    
+    dec = RiskDecision(
+        status="REJECT",
+        symbol="XAUUSD",
+        timeframe="15m",
+        regime="SIDEWAYS",
+        direction="SELL",
+        entry_price=2735.50,
+        stop_loss=2742.00,
+        tp1=2722.50,
+        tp2=2716.00,
+        risk_reward=2.00,
+        setup_reason="Resistance test rejection",
+        candle_timestamp=datetime.now(timezone.utc),
+        rejection_reason="Net Risk/Reward ratio (0.97) after friction ($25.50) is below minimum threshold of 1.50.",
+        position_size=0.10,
+        position_unit="lots",
+        risk_amount_usd=65.0,
+        estimated_cost_usd=22.50,
+        net_risk_reward=0.97,
+        max_capital_at_risk_pct=0.65
+    )
+    ok = dispatcher.send_trade_rejection_alert(dec)
+    assert ok is True
+    assert len(sent_payloads) == 1
+    assert "TRADE REJECTED" in sent_payloads[0]
+    assert "XAUUSD" in sent_payloads[0]
+    assert "Net Risk/Reward ratio" in sent_payloads[0]
+
+def test_telegram_test_rejection_method():
+    dispatcher = TelegramAlertDispatcher(bot_token="fake_token", chat_id="123456")
+    sent_payloads = []
+    dispatcher._send_telegram_raw = lambda text, target_chat_id=None: sent_payloads.append(text) or True
+    
+    res = dispatcher.send_test_rejection_message()
+    assert res["success"] is True
+    assert len(sent_payloads) == 1
+

@@ -67,9 +67,9 @@ def evaluate_sideways_setup(
         sl = swing_low - (sl_atr_mult * atr)
         risk_dist = max(entry - sl, 0.01)
 
-        # TP1 at opposite resistance zone lower boundary
-        tp1 = max(resistance - (zone_atr_mult * atr), entry + risk_dist)
-        tp2 = entry + (target_rr * risk_dist)
+        # TP1 at opposite resistance zone lower boundary (at least target_rr)
+        tp1 = max(resistance - (zone_atr_mult * atr), entry + (target_rr * risk_dist))
+        tp2 = entry + ((target_rr * 1.5) * risk_dist)
         reward_dist = tp1 - entry
         rr_ratio = reward_dist / risk_dist
 
@@ -105,9 +105,9 @@ def evaluate_sideways_setup(
         sl = swing_high + (sl_atr_mult * atr)
         risk_dist = max(sl - entry, 0.01)
 
-        # TP1 at opposite support zone upper boundary
-        tp1 = min(support + (zone_atr_mult * atr), entry - risk_dist)
-        tp2 = entry - (target_rr * risk_dist)
+        # TP1 at opposite support zone upper boundary (at least target_rr)
+        tp1 = min(support + (zone_atr_mult * atr), entry - (target_rr * risk_dist))
+        tp2 = entry - ((target_rr * 1.5) * risk_dist)
         reward_dist = entry - tp1
         rr_ratio = reward_dist / risk_dist
 

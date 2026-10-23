@@ -247,12 +247,21 @@ with st.sidebar:
         )
         st.caption("💬 **Interactive Bot Active:** Send `p/l` or `balance` in Telegram anytime!")
 
-    if st.button("🔔 Send Test Telegram Alert"):
-        res = st.session_state.telegram.send_test_message()
-        if res["success"]:
-            st.success(res["message"])
-        else:
-            st.error(res["message"] + " (Tip: Open t.me/Todaytrade_bot and press START)")
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        if st.button("🔔 Test Alert"):
+            res = st.session_state.telegram.send_test_message()
+            if res["success"]:
+                st.success(res["message"])
+            else:
+                st.error(res["message"] + " (Tip: Open t.me/Todaytrade_bot and press START)")
+    with col_t2:
+        if st.button("🛑 Test Reject Alert"):
+            res = st.session_state.telegram.send_test_rejection_message()
+            if res["success"]:
+                st.success(res["message"])
+            else:
+                st.error(res["message"])
 
     st.divider()
     st.subheader("🤖 Google Gemini AI")
@@ -504,7 +513,7 @@ def render_instrument_tab(symbol_key: str):
         ts_k = cand.candle_timestamp.isoformat() if cand.candle_timestamp else ""
         historical_decisions[ts_k] = cand_dec
 
-    latest_candidate = candidates[-1] if (candidates and candidates[-1].candle_timestamp == last_utc) else None
+    latest_candidate = candidates[-1] if candidates else None
     decision = risk_engine.evaluate(latest_candidate, current_daily_loss=todays_loss, open_positions=open_positions)
 
     # 🤖 AI Decision Authority (Gemini Evaluates & Decides)
@@ -564,10 +573,20 @@ def render_instrument_tab(symbol_key: str):
                 if new_t:
                     st.session_state.db.save_or_update_trade(new_t)
 
-        if enable_telegram and decision.status == "APPROVE":
-            st.session_state.telegram.send_trade_signal_alert(decision, ai_reason=ai_r, account_balance=curr_balance)
-        elif send_telegram_rejections and decision.status == "REJECT":
-            st.session_state.telegram.send_trade_rejection_alert(decision, ai_reason=ai_r)
+        # Dispatch Telegram alert if candidate is recent (within last 4 candles / 60 minutes) to avoid spamming historical signals
+        is_recent_candidate = False
+        if decision.candle_timestamp:
+            try:
+                time_diff = abs((last_utc - decision.candle_timestamp).total_seconds())
+                is_recent_candidate = (time_diff <= 3600)
+            except Exception:
+                is_recent_candidate = True
+
+        if is_recent_candidate:
+            if enable_telegram and decision.status == "APPROVE":
+                st.session_state.telegram.send_trade_signal_alert(decision, ai_reason=ai_r, account_balance=curr_balance)
+            elif send_telegram_rejections and decision.status == "REJECT":
+                st.session_state.telegram.send_trade_rejection_alert(decision, ai_reason=ai_r)
 
     # ----------------- STATUS & METRICS ROW -----------------
     m1, m2, m3, m4, m5 = st.columns([1.5, 1.2, 1.2, 1.2, 1.5])

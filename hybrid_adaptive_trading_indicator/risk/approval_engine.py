@@ -125,19 +125,28 @@ class RiskApprovalEngine:
             )
 
         # 6. Minimum Risk/Reward Check (incorporating friction costs)
-        gross_reward = abs(candidate.tp1 - candidate.entry_price) * spec.contract_size * pos_size
-        net_reward = max(gross_reward - friction, 0.0)
-        net_rr = net_reward / max(total_risk, 0.01)
+        gross_reward_tp1 = abs(candidate.tp1 - candidate.entry_price) * spec.contract_size * pos_size
+        net_reward_tp1 = max(gross_reward_tp1 - friction, 0.0)
+        net_rr_tp1 = net_reward_tp1 / max(total_risk, 0.01)
 
-        if net_rr < self.min_risk_reward:
+        # Also check TP2 if defined for full target potential
+        if candidate.tp2:
+            gross_reward_tp2 = abs(candidate.tp2 - candidate.entry_price) * spec.contract_size * pos_size
+            net_reward_tp2 = max(gross_reward_tp2 - friction, 0.0)
+            net_rr_tp2 = net_reward_tp2 / max(total_risk, 0.01)
+            best_net_rr = max(net_rr_tp1, net_rr_tp2)
+        else:
+            best_net_rr = net_rr_tp1
+
+        if best_net_rr < self.min_risk_reward:
             return self._reject(
                 candidate,
-                rejection_reason=f"Net Risk/Reward ratio ({net_rr:.2f}) after friction (${friction:.2f}) is below minimum threshold of {self.min_risk_reward:.2f}.",
+                rejection_reason=f"Net Risk/Reward ratio ({best_net_rr:.2f}) after friction (${friction:.2f}) is below minimum threshold of {self.min_risk_reward:.2f}.",
                 position_size=pos_size,
                 unit_label=unit_label,
                 risk_usd=total_risk,
                 friction_usd=friction,
-                net_rr=net_rr
+                net_rr=best_net_rr
             )
 
         # APPROVED!
@@ -160,7 +169,7 @@ class RiskApprovalEngine:
             position_unit=unit_label,
             risk_amount_usd=total_risk,
             estimated_cost_usd=friction,
-            net_risk_reward=round(net_rr, 2),
+            net_risk_reward=round(best_net_rr, 2),
             max_capital_at_risk_pct=round(risk_pct_effective, 2)
         )
 

@@ -267,14 +267,15 @@ class TelegramAlertDispatcher:
             return False
 
         local_time_str = self._format_time(decision.candle_timestamp)
-        reason = ai_reason or decision.rejection_reason or "Risk safety criteria not met."
+        raw_reason = ai_reason or decision.rejection_reason or "Risk safety criteria not met."
+        clean_reason = raw_reason.replace("*", "").replace("`", "").replace("_", "")
 
         message = (
             f"🛡️ *TRADE REJECTED BY AI / RISK ENGINE* 🛡️\n\n"
             f"❌ *{decision.direction} {decision.symbol}* ({decision.timeframe})\n"
             f"📊 *Market Regime:* `{decision.regime}`\n"
             f"⚠️ *Status:* `REJECTED`\n"
-            f"🛑 *Rejection Reason:*\n_{reason}_\n\n"
+            f"🛑 *Rejection Reason:*\n_{clean_reason}_\n\n"
             f"📍 *Proposed Entry:* `${decision.entry_price:,.2f}`\n"
             f"⚖️ *Proposed R:R:* `{decision.risk_reward:.2f}R`\n"
             f"🕒 *Time (IST):* `{local_time_str}`\n\n"
@@ -311,6 +312,40 @@ class TelegramAlertDispatcher:
         return {
             "success": ok,
             "message": "Message sent successfully to Telegram!" if ok else "Failed to send message via Telegram API. Check Chat ID."
+        }
+
+    def send_test_rejection_message(self) -> Dict[str, Any]:
+        """
+        Sends a sample trade rejection alert to test rejection notification delivery.
+        """
+        if not self.is_configured:
+            return {"success": False, "message": "Bot token or Chat ID is missing."}
+
+        sample_dec = RiskDecision(
+            status="REJECT",
+            symbol="XAUUSD",
+            timeframe="15m",
+            regime="SIDEWAYS",
+            direction="SELL",
+            entry_price=2735.50,
+            stop_loss=2742.00,
+            tp1=2722.50,
+            tp2=2716.00,
+            risk_reward=2.00,
+            setup_reason="Resistance test rejection candle",
+            candle_timestamp=datetime.now(timezone.utc),
+            rejection_reason="Test Rejection: Net R:R below threshold or capital risk limit exceeded.",
+            position_size=0.10,
+            position_unit="lots",
+            risk_amount_usd=65.0,
+            estimated_cost_usd=22.50,
+            net_risk_reward=1.85,
+            max_capital_at_risk_pct=0.65
+        )
+        ok = self.send_trade_rejection_alert(sample_dec, ai_reason="Sample AI review: High volume trap rejection test.")
+        return {
+            "success": ok,
+            "message": "Rejection alert sent successfully to Telegram!" if ok else "Failed to send rejection alert via Telegram API."
         }
 
     def _send_telegram_raw(self, text: str, target_chat_id: Optional[str] = None) -> bool:
