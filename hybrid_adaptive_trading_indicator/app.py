@@ -51,6 +51,7 @@ from hybrid_adaptive_trading_indicator.storage.database import DatabaseManager
 from hybrid_adaptive_trading_indicator.alerts.telegram import TelegramAlertDispatcher
 from hybrid_adaptive_trading_indicator.backtest.engine import run_backtest
 from hybrid_adaptive_trading_indicator.ai.gemini_advisor import GeminiAdvisor
+from hybrid_adaptive_trading_indicator.scanner import BackgroundMarketScanner, start_background_scanner
 
 # Streamlit Page Setup
 st.set_page_config(
@@ -239,13 +240,14 @@ with st.sidebar:
     auto_paper_trade = st.checkbox("⚡ Auto-Simulate Approved Trades", value=True, help="Automatically open paper trades when signals are approved so Target/SL and P&L are tracked")
     enable_trailing_stop = st.checkbox("Dynamic Trailing Stop-Loss", value=True)
 
-    # Start background interactive Telegram command listener (listens for 'p/l', 'balance', etc.)
+    # Start background interactive Telegram command listener (listens for 'p/l', 'balance', AI chat queries, etc.)
     if st.session_state.telegram.is_configured:
         st.session_state.telegram.start_listener(
             db_manager=st.session_state.db,
-            starting_balance_fn=lambda: float(account_balance)
+            starting_balance_fn=lambda: float(account_balance),
+            gemini_advisor=st.session_state.gemini
         )
-        st.caption("💬 **Interactive Bot Active:** Send `p/l` or `balance` in Telegram anytime!")
+        st.caption("💬 **Interactive Bot & AI Active:** Send `p/l`, `status` or ask any trading question in Telegram!")
 
     col_t1, col_t2 = st.columns(2)
     with col_t1:
@@ -262,6 +264,39 @@ with st.sidebar:
                 st.success(res["message"])
             else:
                 st.error(res["message"])
+    st.divider()
+    st.subheader("⚡ 24/7 Background Scanner")
+    scanner_instance = BackgroundMarketScanner.get_instance()
+    # Synchronize current user configuration to scanner
+    scanner_instance.account_balance = float(account_balance)
+    scanner_instance.risk_pct = float(risk_pct)
+    scanner_instance.max_daily_loss = float(max_daily_loss)
+    scanner_instance.max_concurrent_trades = int(max_concurrent_trades)
+    scanner_instance.min_rr = float(min_rr_filter)
+    scanner_instance.enable_telegram_signals = bool(enable_telegram)
+    scanner_instance.enable_telegram_closed = bool(send_telegram_closed)
+    scanner_instance.enable_telegram_rejections = bool(send_telegram_rejections)
+    scanner_instance.auto_paper_trade = bool(auto_paper_trade)
+    scanner_instance.decision_mode = decision_mode
+
+    # Auto-start scanner if not running
+    if not scanner_instance.is_running:
+        scanner_instance.start(send_startup_alert=False)
+
+    kolkata_tz = pytz.timezone(DISPLAY_TIMEZONE)
+    last_sc_str = scanner_instance.last_scan_time.astimezone(kolkata_tz).strftime("%I:%M:%S %p IST") if scanner_instance.last_scan_time else "Starting first scan..."
+    st.markdown(
+        f"<div style='background: #161b22; padding: 10px 14px; border-radius: 6px; border: 1px solid #238636; margin-bottom: 8px;'>"
+        f"<span style='color: #2ea043; font-weight: 700;'>🟢 24/7 Background Scanner: Active</span><br>"
+        f"<span style='color: #8b949e; font-size: 0.8rem;'>Scanning Gold & BTC every 60s without browser<br>Last scan: <b style='color: #f0f6fc;'>{last_sc_str}</b></span>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+    if st.button("⚡ Trigger Instant Background Scan", key="btn_trigger_instant_scan"):
+        with st.spinner("Scanning Gold & Bitcoin now..."):
+            res = scanner_instance.scan_once()
+            st.success(f"Scan finished at {res.get('time', 'now')}!")
+            st.rerun()
 
     st.divider()
     st.subheader("🤖 Google Gemini AI")

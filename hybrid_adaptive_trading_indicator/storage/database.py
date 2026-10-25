@@ -91,6 +91,16 @@ class DatabaseManager:
                 created_at TEXT NOT NULL
             );
             """)
+
+            # Sent alerts tracking table (persists alert signatures across restarts)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_alerts (
+                signature TEXT PRIMARY KEY,
+                symbol TEXT,
+                alert_type TEXT,
+                created_at TEXT NOT NULL
+            );
+            """)
             conn.commit()
 
     def save_signal(self, decision: RiskDecision) -> int:
@@ -241,3 +251,21 @@ class DatabaseManager:
             """, (symbol, direction, message, 1 if delivered else 0, now_str))
             conn.commit()
             return cursor.lastrowid
+
+    def is_alert_sent(self, signature: str) -> bool:
+        """Checks if an alert with this unique signature was already sent."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT signature FROM sent_alerts WHERE signature = ? LIMIT 1", (signature,))
+            return cursor.fetchone() is not None
+
+    def mark_alert_sent(self, signature: str, symbol: str = "", alert_type: str = ""):
+        """Persists that this alert signature has been sent to avoid duplicates."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            INSERT OR IGNORE INTO sent_alerts (signature, symbol, alert_type, created_at)
+            VALUES (?, ?, ?, ?)
+            """, (signature, symbol, alert_type, now_str))
+            conn.commit()

@@ -23,6 +23,7 @@ class TelegramAlertDispatcher:
     _listener_running: bool = False
     _db_manager = None
     _starting_balance_fn = None
+    _gemini_advisor = None
     _last_update_id: int = 0
     def __init__(
         self,
@@ -149,6 +150,8 @@ class TelegramAlertDispatcher:
         signature = f"APPROVE_{decision.symbol}_{decision.direction}_{ts_str}"
         if signature in self.sent_signatures:
             return False
+        if TelegramAlertDispatcher._db_manager and TelegramAlertDispatcher._db_manager.is_alert_sent(signature):
+            return False
 
         local_time_str = self._format_time(decision.candle_timestamp)
         emoji = "🟢" if decision.direction == "BUY" else "🔴"
@@ -183,6 +186,8 @@ class TelegramAlertDispatcher:
         success = self._send_telegram_raw(message)
         if success:
             self.sent_signatures.add(signature)
+            if TelegramAlertDispatcher._db_manager:
+                TelegramAlertDispatcher._db_manager.mark_alert_sent(signature, decision.symbol, "APPROVE")
         return success
 
     def send_trade_closed_alert(
@@ -200,6 +205,8 @@ class TelegramAlertDispatcher:
 
         signature = f"CLOSED_{trade.trade_id}_{trade.status}"
         if signature in self.sent_signatures:
+            return False
+        if TelegramAlertDispatcher._db_manager and TelegramAlertDispatcher._db_manager.is_alert_sent(signature):
             return False
 
         local_time_str = self._format_time(trade.exit_time or datetime.now(timezone.utc))
@@ -249,6 +256,8 @@ class TelegramAlertDispatcher:
         success = self._send_telegram_raw(message)
         if success:
             self.sent_signatures.add(signature)
+            if TelegramAlertDispatcher._db_manager:
+                TelegramAlertDispatcher._db_manager.mark_alert_sent(signature, trade.symbol, "CLOSED")
         return success
 
     def send_trade_rejection_alert(self, decision: RiskDecision, ai_reason: Optional[str] = None) -> bool:
@@ -264,6 +273,8 @@ class TelegramAlertDispatcher:
         ts_str = decision.candle_timestamp.isoformat() if decision.candle_timestamp else "NOW"
         signature = f"REJECT_{decision.symbol}_{decision.direction}_{ts_str}"
         if signature in self.sent_signatures:
+            return False
+        if TelegramAlertDispatcher._db_manager and TelegramAlertDispatcher._db_manager.is_alert_sent(signature):
             return False
 
         local_time_str = self._format_time(decision.candle_timestamp)
@@ -285,6 +296,8 @@ class TelegramAlertDispatcher:
         success = self._send_telegram_raw(message)
         if success:
             self.sent_signatures.add(signature)
+            if TelegramAlertDispatcher._db_manager:
+                TelegramAlertDispatcher._db_manager.mark_alert_sent(signature, decision.symbol, "REJECT")
         return success
 
     def _format_time(self, candle_ts: Optional[datetime]) -> str:
@@ -372,10 +385,18 @@ class TelegramAlertDispatcher:
         except Exception:
             return False
 
-    def start_listener(self, db_manager, starting_balance_fn):
-        """Starts a background daemon thread that listens for user commands (p/l, balance, etc.)."""
+    def start_listener(self, db_manager, starting_balance_fn, gemini_advisor=None):
+        """Starts a background daemon thread that listens for user commands (p/l, balance, AI queries, etc.)."""
         TelegramAlertDispatcher._db_manager = db_manager
         TelegramAlertDispatcher._starting_balance_fn = starting_balance_fn
+        if gemini_advisor:
+            TelegramAlertDispatcher._gemini_advisor = gemini_advisor
+        elif TelegramAlertDispatcher._gemini_advisor is None:
+            try:
+                from hybrid_adaptive_trading_indicator.ai.gemini_advisor import GeminiAdvisor
+                TelegramAlertDispatcher._gemini_advisor = GeminiAdvisor()
+            except Exception:
+                pass
 
         if TelegramAlertDispatcher._listener_running and TelegramAlertDispatcher._listener_thread and TelegramAlertDispatcher._listener_thread.is_alive():
             return
@@ -424,7 +445,8 @@ class TelegramAlertDispatcher:
 
                         chat = msg.get("chat", {})
                         chat_id = str(chat.get("id", ""))
-                        text = (msg.get("text") or "").strip().lower()
+                        raw_text = (msg.get("text") or "").strip()
+                        text = raw_text.lower()
 
                         if not text:
                             continue
@@ -434,6 +456,10 @@ class TelegramAlertDispatcher:
                             self.set_chat_id(chat_id)
                             self._save_chat_id_to_env(chat_id)
 
+                        # Whitelist security check: only reply to authorized trader chat ID
+                        if self.chat_id and str(chat_id) != str(self.chat_id):
+                            continue
+
                         starting_bal = 10000.0
                         if TelegramAlertDispatcher._starting_balance_fn:
                             try:
@@ -441,7 +467,10 @@ class TelegramAlertDispatcher:
                             except Exception:
                                 starting_bal = 10000.0
 
-                        if text in ["p/l", "pnl", "/pnl", "pl", "profit", "loss", "p&l"]:
+                        if text in ["status", "/status", "bot", "health", "alive", "ping"]:
+                            reply = self._build_status_report(starting_bal)
+                            self._send_telegram_raw(reply, target_chat_id=chat_id)
+                        elif text in ["p/l", "pnl", "/pnl", "pl", "profit", "loss", "p&l"]:
                             reply = self._build_pnl_report(starting_bal)
                             self._send_telegram_raw(reply, target_chat_id=chat_id)
                         elif text in ["balance", "/balance", "bal", "capital"]:
@@ -453,13 +482,70 @@ class TelegramAlertDispatcher:
                         elif text in ["trades", "/trades", "history", "log"]:
                             reply = self._build_recent_trades_report()
                             self._send_telegram_raw(reply, target_chat_id=chat_id)
-                        elif text in ["help", "/help", "/start", "hi", "hello", "menu"]:
+                        elif text in ["help", "/help", "/start", "menu"]:
                             reply = self._build_help_message()
                             self._send_telegram_raw(reply, target_chat_id=chat_id)
+                        else:
+                            # Forward all custom trading queries and conversations to Gemini AI!
+                            self._handle_ai_chat_query(raw_text, chat_id, starting_bal)
             except Exception:
                 pass
 
             time.sleep(2)
+
+    def _handle_ai_chat_query(self, user_prompt: str, target_chat_id: str, starting_balance: float):
+        """Sends typing indicator and queries Gemini AI with live market/account context."""
+        if not TelegramAlertDispatcher._gemini_advisor:
+            try:
+                from hybrid_adaptive_trading_indicator.ai.gemini_advisor import GeminiAdvisor
+                TelegramAlertDispatcher._gemini_advisor = GeminiAdvisor()
+            except Exception:
+                pass
+
+        if not TelegramAlertDispatcher._gemini_advisor or not TelegramAlertDispatcher._gemini_advisor.is_configured():
+            msg = "⚠️ *Gemini AI Not Configured*\nPlease ensure GEMINI_API_KEY is configured in your `.env` file."
+            self._send_telegram_raw(msg, target_chat_id=target_chat_id)
+            return
+
+        # Send Telegram typing indicator
+        try:
+            action_url = f"https://api.telegram.org/bot{self.bot_token}/sendChatAction"
+            requests.post(action_url, json={"chat_id": target_chat_id, "action": "typing"}, timeout=3)
+        except Exception:
+            pass
+
+        # Build live trading context for Gemini
+        context = {"balance": starting_balance}
+        if TelegramAlertDispatcher._db_manager:
+            try:
+                all_t = TelegramAlertDispatcher._db_manager.get_all_paper_trades(limit=100)
+                closed = [t for t in all_t if str(t.get("status", "")).startswith("CLOSED")]
+                realized = sum(t.get("pnl_net", 0.0) for t in closed)
+                open_t = [t for t in all_t if t.get("status") == "OPEN"]
+                context["balance"] = starting_balance + realized
+                context["realized_pnl"] = realized
+                context["open_trades"] = f"{len(open_t)} active positions"
+
+                recent_sigs = TelegramAlertDispatcher._db_manager.get_all_signals(limit=3)
+                if recent_sigs:
+                    sig_summaries = [f"{s.get('symbol')} {s.get('direction')} ({s.get('status')})" for s in recent_sigs]
+                    context["latest_signals"] = ", ".join(sig_summaries)
+            except Exception:
+                pass
+
+        try:
+            reply = TelegramAlertDispatcher._gemini_advisor.chat_with_user(user_prompt, context)
+            if not reply:
+                reply = "Main aapka sawal process nahi kar paya, kripya dobara poochein."
+
+            # Handle chunking if response is very long (> 4000 characters)
+            if len(reply) > 4000:
+                for i in range(0, len(reply), 3900):
+                    self._send_telegram_raw(reply[i:i+3900], target_chat_id=target_chat_id)
+            else:
+                self._send_telegram_raw(reply, target_chat_id=target_chat_id)
+        except Exception as e:
+            self._send_telegram_raw(f"⚠️ Error generating AI reply: {e}", target_chat_id=target_chat_id)
 
     def _build_pnl_report(self, starting_balance: float) -> str:
         if not TelegramAlertDispatcher._db_manager:
@@ -569,15 +655,50 @@ class TelegramAlertDispatcher:
             )
         return "\n".join(lines)
 
+    def _build_status_report(self, starting_balance: float) -> str:
+        kolkata_tz = pytz.timezone(DISPLAY_TIMEZONE)
+        time_str = datetime.now(kolkata_tz).strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+        open_cnt = 0
+        closed_cnt = 0
+        realized_pnl = 0.0
+        if TelegramAlertDispatcher._db_manager:
+            all_trades = TelegramAlertDispatcher._db_manager.get_all_paper_trades(limit=500)
+            open_cnt = len([t for t in all_trades if t.get("status") == "OPEN"])
+            closed_trades = [t for t in all_trades if str(t.get("status", "")).startswith("CLOSED")]
+            closed_cnt = len(closed_trades)
+            realized_pnl = sum(t.get("pnl_net", 0.0) for t in closed_trades)
+
+        curr_bal = starting_balance + realized_pnl
+        pnl_prefix = "+" if realized_pnl >= 0 else "-"
+
+        return (
+            f"⚡ *24/7 BACKGROUND SCANNER STATUS* ⚡\n\n"
+            f"🟢 *Scanner State:* `RUNNING & HEALTHY`\n"
+            f"📡 *Markets Polled:* `XAUUSD (Gold)` & `BTCUSDT (Bitcoin)`\n"
+            f"⏱️ *Timeframe:* `15m Candles`\n"
+            f"🕒 *Current Time:* `{time_str}`\n\n"
+            f"💼 *Active Open Positions:* `{open_cnt}`\n"
+            f"🏁 *Total Completed Trades:* `{closed_cnt}`\n"
+            f"💵 *Realized P&L:* *{pnl_prefix}${abs(realized_pnl):,.2f}*\n"
+            f"💰 *Account Balance:* *${curr_bal:,.2f}*\n\n"
+            f"_🛡️ Scanning continuously in background. New setups will trigger alerts instantly!_"
+        )
+
     def _build_help_message(self) -> str:
         return (
-            "🤖 *Hybrid Adaptive Trading Bot Commands* 🤖\n\n"
-            "Aap Telegram par ye messages bhej sakte hain:\n\n"
-            "• *p/l* ya */pnl* 👉 Live Profit/Loss aur Account Balance report\n"
-            "• *balance* 👉 Current account balance check karein\n"
+            "🤖 *Hybrid Adaptive Trading Bot & AI Assistant* 🤖\n\n"
+            "Aap Telegram par ye commands aur sawal bhej sakte hain:\n\n"
+            "• *status* ya */status* 👉 24/7 Scanner Health & Market status\n"
+            "• *p/l* ya */pnl* 👉 Live Profit/Loss aur Win Rate report\n"
+            "• *balance* 👉 Current account balance summary\n"
             "• *open* 👉 Running active positions dekhein\n"
-            "• *trades* 👉 Recent trades aur P&L history dekhein\n"
+            "• *trades* 👉 Recent closed trades aur P&L history\n"
             "• *help* 👉 Yeh help message dekhein\n\n"
-            "⚡ _Bot 24/7 active hai aur turant reply karega!_"
+            "🧠 *AI Trading Chat:* Aap mujhse Hindi ya English me koi bhi sawal pooch sakte hain! Example:\n"
+            "• _'Gold me trade kyu reject hui?'_\n"
+            "• _'Bitcoin ka trend kaisa dikh raha hai?'_\n"
+            "• _'Risk management tips do'_\n\n"
+            "⚡ _Bot 24/7 active hai aur aapko instant reply dega!_"
         )
 

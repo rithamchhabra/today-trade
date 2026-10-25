@@ -17,6 +17,11 @@ class GeminiAdvisor:
     Supports google.genai and legacy google.generativeai with automatic fallback.
     """
     def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except Exception:
+            pass
         self.api_key = api_key if api_key is not None else (os.getenv("GEMINI_API_KEY") or "")
         self.model_name = model_name
         self._client = None
@@ -281,3 +286,47 @@ Note: "decision" MUST be strictly either "APPROVE" or "REJECT".
                 "key_risk": "Market volatility & fakeout risk",
                 "action_plan": "Execute with discipline according to risk parameters."
             }
+
+    def chat_with_user(self, user_message: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Handles natural language conversation with the trader on Telegram or UI.
+        Provides intelligent, context-aware market analysis in Hindi/Hinglish/English.
+        """
+        if not self.is_configured():
+            return "⚠️ Gemini AI is not configured. Please add GEMINI_API_KEY in your .env file."
+
+        ctx_lines = []
+        if context:
+            if "balance" in context:
+                ctx_lines.append(f"- Current Account Balance: ${context['balance']:,.2f}")
+            if "realized_pnl" in context:
+                ctx_lines.append(f"- Total Realized P&L: ${context['realized_pnl']:+,.2f}")
+            if "open_trades" in context:
+                ctx_lines.append(f"- Active Open Positions: {context['open_trades']}")
+            if "latest_signals" in context:
+                ctx_lines.append(f"- Recent Market Signals: {context['latest_signals']}")
+
+        ctx_str = "\n".join(ctx_lines) if ctx_lines else "No active trades currently."
+
+        prompt = f"""
+You are the personal AI Trading Companion for the 'Hybrid Adaptive Trading System' (specializing in Gold XAUUSD and Bitcoin BTCUSDT 15m intraday algorithmic trading).
+You are chatting directly with your trader (Ritham) via Telegram.
+
+### Live System Status & Context:
+{ctx_str}
+
+### Instructions for Response:
+1. Tone: Friendly, smart, disciplined, and realistic. Never give blind financial guarantees; emphasize risk management.
+2. Language:
+   - If user asks in Hindi or Hinglish (e.g., "bhai kaisa market h", "kya lagta h"), reply naturally in clean, friendly Hinglish (Hindi written in Roman English alphabet).
+   - If user asks in English, reply in professional, concise English.
+3. Length: Keep it crisp and easy to read on a phone screen (Telegram format, max 2-3 short paragraphs or bullet points). Use emojis nicely.
+4. If asked about current trades, P&L, or market conditions, use the live system context above.
+
+User's Question:
+"{user_message}"
+
+Your reply:
+"""
+        reply = self._generate(prompt)
+        return reply.strip()
