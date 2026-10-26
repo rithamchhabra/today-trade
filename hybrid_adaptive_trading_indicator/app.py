@@ -306,10 +306,19 @@ with st.sidebar:
         type="password",
         help="Enter Google Gemini API key to enable AI trade setup reviews and market intelligence."
     )
+    model_options = [
+        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash"
+    ]
+    current_model = st.session_state.gemini.model_name or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    default_idx = model_options.index(current_model) if current_model in model_options else 0
     gemini_model_choice = st.selectbox(
         "Gemini Model",
-        ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"],
-        index=0
+        model_options,
+        index=default_idx
     )
     if gemini_key_input:
         st.session_state.gemini.set_api_key(gemini_key_input)

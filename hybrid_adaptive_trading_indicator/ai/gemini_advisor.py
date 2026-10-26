@@ -16,14 +16,35 @@ class GeminiAdvisor:
     Client for interacting with Google Gemini AI models.
     Supports google.genai and legacy google.generativeai with automatic fallback.
     """
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
         try:
             from dotenv import load_dotenv
             load_dotenv()
         except Exception:
             pass
+
+        # Robust built-in .env loader if environment variable not yet set
+        if not os.getenv("GEMINI_API_KEY"):
+            candidate_paths = [
+                os.path.abspath(".env"),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+            ]
+            for env_path in candidate_paths:
+                if os.path.exists(env_path):
+                    try:
+                        with open(env_path, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line and not line.startswith("#") and "=" in line:
+                                    k, v = line.split("=", 1)
+                                    os.environ.setdefault(k.strip(), v.strip())
+                        break
+                    except Exception:
+                        pass
+
         self.api_key = api_key if api_key is not None else (os.getenv("GEMINI_API_KEY") or "")
-        self.model_name = model_name
+        self.model_name = model_name or os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
         self._client = None
         self._legacy_configured = False
 
@@ -48,29 +69,72 @@ class GeminiAdvisor:
             from google import genai
             self._client = genai.Client(api_key=self.api_key)
         except Exception as e:
-            logger.warning(f"Failed to init google.genai client: {e}. Falling back to legacy SDK.")
+            logger.warning(f"Failed to init google.genai client: {e}. Falling back to legacy SDK / REST.")
             try:
                 import google.generativeai as legacy_genai
                 legacy_genai.configure(api_key=self.api_key)
                 self._legacy_configured = True
             except Exception as legacy_err:
-                logger.error(f"Failed to init both GenAI SDKs: {legacy_err}")
+                logger.warning(f"Failed to init legacy GenAI SDK: {legacy_err}")
+
+    def _get_candidate_models(self) -> list:
+        """Return ordered list of main model and working fallback models."""
+        env_fallbacks = os.getenv("GEMINI_FALLBACK_MODELS", "")
+        fallback_list = [m.strip() for m in env_fallbacks.split(",") if m.strip()] if env_fallbacks else []
+        
+        default_working = [
+            "gemini-3.5-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.6-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash"
+        ]
+
+        ordered = [self.model_name] + fallback_list + default_working
+        unique_models = []
+        for m in ordered:
+            if m and m not in unique_models:
+                unique_models.append(m)
+        return unique_models
+
+    def _generate_rest(self, model: str, prompt: str) -> Optional[str]:
+        """Direct REST HTTP call using standard urllib as a fail-safe fallback."""
+        import urllib.request
+        import urllib.error
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}]
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        text = parts[0].get("text", "").strip()
+                        if text:
+                            return text
+        except Exception as e:
+            logger.debug(f"Direct REST call failed for {model}: {e}")
+        return None
 
     def _generate(self, prompt: str) -> str:
-        """Helper to generate content using available SDK and fallbacks."""
+        """Helper to generate content using available SDK, fallbacks, and REST API."""
         if not self.is_configured():
             return "⚠️ Gemini API Key not configured. Please enter your GEMINI_API_KEY in the sidebar or `.env`."
 
-        candidate_models = [self.model_name, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
-        # Remove duplicates while preserving order
-        unique_models = []
-        for m in candidate_models:
-            if m not in unique_models:
-                unique_models.append(m)
+        candidate_models = self._get_candidate_models()
 
         # 1. Try google.genai client
         if self._client:
-            for model in unique_models:
+            for model in candidate_models:
                 try:
                     response = self._client.models.generate_content(
                         model=model,
@@ -79,7 +143,7 @@ class GeminiAdvisor:
                     if response and hasattr(response, "text") and response.text:
                         return response.text.strip()
                 except Exception as e:
-                    logger.warning(f"google.genai call failed with model {model}: {e}")
+                    logger.debug(f"google.genai call failed with model {model}: {e}")
                     continue
 
         # 2. Try legacy google.generativeai
@@ -89,17 +153,23 @@ class GeminiAdvisor:
                 legacy_genai.configure(api_key=self.api_key)
                 self._legacy_configured = True
 
-            for model in unique_models:
+            for model in candidate_models:
                 try:
                     m = legacy_genai.GenerativeModel(model)
                     res = m.generate_content(prompt)
                     if res and hasattr(res, "text") and res.text:
                         return res.text.strip()
                 except Exception as legacy_err:
-                    logger.warning(f"legacy google.generativeai failed with {model}: {legacy_err}")
+                    logger.debug(f"legacy google.generativeai failed with {model}: {legacy_err}")
                     continue
         except Exception as e:
-            logger.error(f"Legacy generativeai execution error: {e}")
+            logger.debug(f"Legacy generativeai execution error: {e}")
+
+        # 3. Try direct REST API fallback
+        for model in candidate_models:
+            rest_res = self._generate_rest(model, prompt)
+            if rest_res:
+                return rest_res
 
         return "❌ Error: Could not generate analysis from Gemini. Please verify your API key and network connection."
 
